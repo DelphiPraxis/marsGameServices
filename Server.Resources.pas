@@ -11,6 +11,10 @@ interface
 uses
   SysUtils, Classes
 
+  System.Generics.Collections,
+  Spring.Persistence.Core.Interfaces,
+  Spring.Persistence.Core.Session, Data.Module,
+
   , MARS.Core.Attributes, MARS.Core.MediaType, MARS.Core.JSON, MARS.Core.Response
   , MARS.Core.URL
 
@@ -18,30 +22,6 @@ uses
 ;
 
 type
-  TNetScoreRecord =
-  Record
-    Name       : String;
-    Score      : String;
-    Difficulty : String;
-    Hash       : String;
-  End;
-
-  TScoreRecord =
-  Record
-    srName       : String;
-    srScore      : Integer;
-    srDifficulty : Integer;
-    srHash       : String;
-  End;
-
-  THighScoreRecord =
-  Record
-    Name       : String;
-    Score      : Int64;
-  End;
-  PHighScoreRecord = ^THighScoreRecord;
-
-
   [Path('rgbquick')]
   TGameServicesResource = class
   protected
@@ -86,7 +66,8 @@ implementation
 
 
 uses
-    MARS.Core.Registry, System.Hash, System.Generics.Collections, System.Generics.Defaults, System.SyncObjs, System.Diagnostics, Vcl.ExtCtrls, misc_functions;
+    MARS.Core.Registry, System.Hash, System.Generics.Collections, System.Generics.Defaults, System.SyncObjs, System.Diagnostics, Vcl.ExtCtrls, misc_functions
+    Data.ORM.Scores;
 
 
 const
@@ -98,11 +79,14 @@ const
 
 
 var
-  RGBquickScoreListEasy   : TList<PHighScoreRecord>;
-  RGBquickScoreListMedium : TList<PHighScoreRecord>;
-  RGBquickScoreListHard   : TList<PHighScoreRecord>;
+  //for ORM
+  FConnection: IDBConnection;
+  FSession: TSession;
+  RGBquickScoreListEasy   : IList<Data.ORM.TScore>;
+  RGBquickScoreListMedium : IList<Data.ORM.TScore>;
+  RGBquickScoreListHard   : IList<Data.ORM.TScore>;
   RGBquickScoreChanged    : Boolean = False;
-  RGBquickScoreCache      : TStringList;
+  RGBquickScoreCache      : TStrings;
   autoSaveThread          : TAutoSaveThread;
   listCriticalSection     : TCriticalSection;
   cacheCriticalSection    : TCriticalSection;
@@ -158,7 +142,7 @@ begin
   {$IFDEF SCOREDEBUG}AddDebugEntry('RGBquick leaderboard request (before)');{$ENDIF}
   If AUserAgent = RGBquickUserAgent then
   Begin
-    If RGBquickScoreChanged = True then
+    If RGBquickScoreChanged then
     Begin
       cacheCriticalSection.Enter;
       Try
@@ -185,9 +169,9 @@ begin
   While Terminated = False do
   Begin
     // Wait 10 seconds
-    For I := 0 to WaitCycles-1 do If (RGBquickScoreChanged = False) and (FinalizeTriggered = False) and (Terminated = False) then Sleep(100);
+    For I := 0 to WaitCycles-1 do If (not RGBquickScoreChanged) and (not FinalizeTriggered) and (not Terminated) then Sleep(100);
     // Save leaderboard
-    If (RGBquickScoreChanged = True) and (FinalizeTriggered = False) and (Terminated = False) then
+    If (RGBquickScoreChanged) and (not FinalizeTriggered) and (not Terminated ) then
     Begin
       {$IFDEF TRACEDEBUG}AddDebugEntry('Calling RGBquickSaveLeaderboard from AutoSaveThread');{$ENDIF}
       RGBquickSaveLeaderboard;
@@ -200,8 +184,9 @@ end;
 procedure RGBquickLeaderboardToStringList(sList : TStringList);
 var
   I     : Integer;
+  score_ : TScore;
 
-  function StringFromScordRecord(nScore : PHighScoreRecord; iDifficulty : Integer) : String;
+  function StringFromScordRecord(nScore : TScore; iDifficulty : Integer) : String;
   begin
     Result := 'Entry("Name='+nScore.Name+'",Score='+IntToStr(nScore.Score)+',Difficulty='+IntToStr(iDifficulty)+')';
   end;
@@ -209,9 +194,9 @@ var
 begin
   listCriticalSection.Enter;
   Try
-    For I := 0 to RGBquickScoreListEasy.Count-1   do sList.Add(StringFromScordRecord(RGBquickScoreListEasy[I]  ,0));
-    For I := 0 to RGBquickScoreListMedium.Count-1 do sList.Add(StringFromScordRecord(RGBquickScoreListMedium[I],1));
-    For I := 0 to RGBquickScoreListHard.Count-1   do sList.Add(StringFromScordRecord(RGBquickScoreListHard[I]  ,2));
+    for score_ in RGBquickScoreListEasy do sList.Add(StringFromScordRecord(score_ ,0));
+    for score_ in RGBquickScoreListMedium do sList.Add(StringFromScordRecord(score_ ,1));
+    for score_ in RGBquickScoreListHard do sList.Add(StringFromScordRecord(score_ ,2));
   Finally
     listCriticalSection.Leave;
   End;
@@ -226,7 +211,7 @@ begin
     RGBquickScoreCache.Clear;
     RGBquickLeaderboardToStringList(RGBquickScoreCache);
     Try
-      RGBquickScoreCache.SaveToFile(RGBquickLeaderboardPath+RGBquickLeaderboardFile);
+      //RGBquickScoreCache.SaveToFile(RGBquickLeaderboardPath+RGBquickLeaderboardFile);
       RGBquickScoreChanged := False;
     Except
       {$IFDEF TRACEDEBUG}AddDebugEntry('Exception trying to save RGBquick leaderboard to "'+RGBquickLeaderboardPath+RGBquickLeaderboardFile+'"');{$ENDIF}
@@ -410,6 +395,13 @@ begin
   clientStopWatch := TStopWatch.Create;
   clientStopWatch.Start;
 
+  // Connect ORM to database connection
+  FConnection := TFireDACConnectionAdapter.Create(Data.Module.DataModule1.FDConnection1);
+
+  FConnection.AutoFreeConnection := True;
+  FConnection.Connect;
+  FSession := TSession.Create(FConnection);
+
   listCriticalSection     := TCriticalSection.Create;
   cacheCriticalSection    := TCriticalSection.Create;
 
@@ -437,6 +429,9 @@ begin
 
   listCriticalSection.Free;
   cacheCriticalSection.Free;
+  //ORM
+  FSession.Free;
+  FConnection.Disconnect;
 end;
 
 
